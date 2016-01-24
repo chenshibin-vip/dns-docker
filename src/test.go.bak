@@ -1,0 +1,202 @@
+package main
+
+import (
+	"fmt"
+	docker "github.com/fsouza/go-dockerclient"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+//发送邮件
+func sendMail(mailContent string) {
+	//	cmd := exec.Command("/bin/mail", "-s", "title", "1220642745@qq.com", "chensb@infobird.com", "zhangtaot@infobird.com")
+	cmd := exec.Command("/bin/mail", "-s", "title", "1220642745@qq.com", "chensb@infobird.com")
+	cmd.Stdin = strings.NewReader(mailContent) //输入
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println(err)
+	}
+}
+
+func initIps() (string, string) {
+	//方舟Docker机器
+	fzDockerIps := "10.122.75.210,10.122.75.211,10.122.75.212,10.122.75.213,10.122.75.193"
+	//服务件Docker机器
+	fwjDockerIps := "223.202.102.217,223.202.31.234,10.122.75.201,10.122.75.202,10.122.75.208,10.122.75.209,10.122.75.215"
+
+	//方舟普通机器
+	fzMachineIps := "10.122.75.207"
+	//服务件普通机器
+	fwjMachineIps := "10.122.75.214"
+	//张涛组普通机器
+	ztMachineIps := "10.122.75.194,10.122.75.206"
+	//丁丁组普通机器
+	ddMachineIps := "10.122.75.189,10.122.75.190,10.122.75.191,10.122.75.192"
+
+	dockerIps := fzDockerIps + "," + fwjDockerIps
+	machineIps := fzMachineIps + "," + fwjMachineIps + "," + ztMachineIps + "," + ddMachineIps
+	return dockerIps, machineIps
+}
+
+func main() {
+	dockerIps, machineIps := initIps()
+
+	dockerIpArr := strings.Split(dockerIps, ",")
+	for i := 0; i < len(dockerIpArr); i++ {
+		fmt.Println("dockerIP: ", dockerIpArr[i])
+		if dockerIpArr[i] != "" {
+			go listenDockerStatus(dockerIpArr[i])
+		}
+	}
+
+	machineIpArr := strings.Split(machineIps, ",")
+	for i := 0; i < len(machineIpArr); i++ {
+		fmt.Println("machineIP: ", machineIpArr[i])
+		if machineIpArr[i] != "" {
+			go listenMachineStatus(machineIpArr[i])
+		}
+	}
+
+	select {}
+}
+
+//监听主机状态
+func listenMachineStatus(ip string) {
+	count := 0
+	for {
+		sh := exec.Command("/bin/ping", "-c4", ip)
+		out, err := sh.CombinedOutput()
+		if err != nil {
+			fmt.Println("Unable to ping machine("+ip+")", string(out))
+
+			if count >= 3 {
+				sendMail("Unable to ping machine(" + ip + ")")
+				//break
+			}
+			count++
+		} else {
+			if count > 0 {
+				count--
+			}
+		}
+		//		fmt.Println("ip: "+ip, count)
+		time.Sleep(10 * time.Second)
+	}
+}
+
+//监听Docker状态
+func listenDockerStatus(ip string) {
+	//endpoint := "unix:///var/run/docker.sock"
+	endpoint := "http://" + ip + ":4243"
+	client, err := docker.NewClient(endpoint)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	eventChan := make(chan *docker.APIEvents, 100)
+	defer close(eventChan)
+
+	watching := false
+	for {
+
+		if client == nil {
+			break
+		}
+		err := client.Ping()
+		if err != nil {
+			sendMail("Unable to ping docker daemon in machine(" + ip + ")")
+			fmt.Printf("Unable to ping docker daemon: %s", err)
+			if watching {
+				client.RemoveEventListener(eventChan)
+				watching = false
+				client = nil
+			}
+			time.Sleep(10 * time.Second)
+			continue
+			//break
+		}
+
+		if !watching {
+			err = client.AddEventListener(eventChan)
+			if err != nil && err != docker.ErrListenerAlreadyExists {
+				fmt.Printf("Error registering docker event listener: %s", err)
+				time.Sleep(10 * time.Second)
+				continue
+			}
+			watching = true
+			//fmt.Println("Watching docker events")
+		}
+
+		select {
+		case event := <-eventChan:
+			if event == nil {
+				if watching {
+					client.RemoveEventListener(eventChan)
+					watching = false
+					client = nil
+				}
+				break
+			}
+
+			if event.Status == "start" {
+				id := event.ID[:12]
+				container, err := client.InspectContainer(id)
+				if err != nil {
+					fmt.Println(err)
+				}
+				containerName := SubstrAfter(container.Name, 0)
+
+				fmt.Println(ip, containerName, "is started")
+			} else if event.Status == "stop" {
+				id := event.ID[:12]
+				container, err := client.InspectContainer(id)
+				if err != nil {
+					fmt.Println(ip, id, "is deleted")
+					sendMail("container(id: " + id + ") is deleted in machine(" + ip + ")")
+					continue
+				}
+				containerName := SubstrAfter(container.Name, 0)
+				fmt.Println(ip, containerName, "is stoped")
+				sendMail("container(name: " + containerName + ") is stoped in machine(" + ip + ")")
+			}
+
+		case <-time.After(10 * time.Second):
+			// check for docker liveness
+		}
+	}
+}
+
+//截取固定位置以前的字符串
+func SubstrBefore(s string, l int) string {
+	if len(s) <= l {
+		return s
+	}
+	ret, rs := "", []rune(s)
+
+	for i, r := range rs {
+		if i >= l {
+			break
+		}
+
+		ret += string(r)
+	}
+	return ret
+}
+
+//截取固定位置以后的字符串
+func SubstrAfter(s string, l int) string {
+	if len(s) <= l {
+		return s
+	}
+	ret, rs := "", []rune(s)
+
+	for i, r := range rs {
+		if i <= l {
+			continue
+		}
+
+		ret += string(r)
+	}
+	return ret
+}

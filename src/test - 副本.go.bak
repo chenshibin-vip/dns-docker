@@ -1,0 +1,25 @@
+package main
+
+import (
+	"common"
+	"fmt"
+	"strings"
+)
+
+func main() {
+	dName := ""
+	cName := "regiter_nginx_1"
+	index := strings.Index(str, "_")
+
+	if index < 0 {
+		dName = cName + ".com"
+		return dName
+	}
+
+	rdName := common.SubstrAfter(str, index)
+	sIndex := strings.Index(str, "_")
+
+	fmt.Println("index:", index)
+
+	fmt.Println("rstr:", rstr)
+}
